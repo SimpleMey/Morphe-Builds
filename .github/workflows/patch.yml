@@ -444,7 +444,12 @@ jobs:
               [ -f "$apk" ] || continue
               basename "$apk" >> keep_apks.txt
             done
-            python scripts/cleanup_old_apks.py --release latest --keep-file keep_apks.txt || \
+            # --retire removes permanently-renamed assets whose identity prefix no
+            # longer matches any new build. The anddea RVX apps were renamed from
+            # youtube*-revanced-anddea-*.apk to rvx-app/rvx-music-anddea-*.apk, so the
+            # old-named copies would otherwise linger forever.
+            python scripts/cleanup_old_apks.py --release latest --keep-file keep_apks.txt \
+              --retire 'revanced-anddea.*\.apk$' || \
               echo "⚠️  cleanup_old_apks.py failed; continuing with exact-name cleanup"
 
             # Upload new APKs and manifest

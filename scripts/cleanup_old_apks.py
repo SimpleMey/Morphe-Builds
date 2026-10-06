@@ -159,6 +159,12 @@ def main() -> int:
     parser.add_argument("--release", default="latest", help="release tag (default: latest)")
     parser.add_argument("--keep-file", required=True,
                         help="newline-delimited file of APK basenames to preserve")
+    parser.add_argument("--retire", action="append", default=[],
+                        help="regex (case-insensitive) matched against asset names; any APK "
+                             "matching a retire pattern and not in the keep-set is deleted, "
+                             "regardless of its identity prefix. Use this for permanently "
+                             "renamed/retired naming schemes (e.g. 'revanced-anddea' after it "
+                             "was renamed to 'rvx-app'/'rvx-music'). Repeatable.")
     parser.add_argument("--dry-run", action="store_true", help="list deletions without performing them")
     args = parser.parse_args()
 
@@ -173,12 +179,22 @@ def main() -> int:
     # share a prefix when multiple arches of the same app are kept).
     keep_prefixes = {identity_prefix(n) for n in keep}
 
+    # Compile retire patterns (permanently-retired naming schemes).
+    retire_patterns = []
+    for pat in args.retire:
+        try:
+            retire_patterns.append(re.compile(pat, re.IGNORECASE))
+        except re.error as e:
+            print(f"⚠️  ignoring invalid --retire pattern {pat!r}: {e}", file=sys.stderr)
+
     to_delete = []  # list of asset dicts
     for asset in assets:
         name = str(asset.get("name", ""))
         if not name or name in keep:
             continue  # explicitly kept (or unnamed)
-        if identity_prefix(name) in keep_prefixes:
+        if any(p.search(name) for p in retire_patterns):
+            to_delete.append(asset)  # retired naming scheme -> always remove
+        elif identity_prefix(name) in keep_prefixes:
             to_delete.append(asset)  # same app/arch, but a different (older) version
         # else: an app/arch we didn't rebuild this run -> leave it untouched
 

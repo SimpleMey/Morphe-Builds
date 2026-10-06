@@ -1,5 +1,8 @@
-# RVX App (Anddea YouTube): name "RVX App", Revancify Red icon, Theme patch removed.
+# RVX App (Anddea YouTube): launcher name "RVX App", Revancify Red icon,
+# in-app settings menu label "RVX App" (default is "RVX"), Theme patch removed.
 + Custom branding for YouTube
 @customName=RVX App
 @appIcon=revancify_red
++ Settings for YouTube
+@rvxSettingsLabel=RVX App
 - Theme

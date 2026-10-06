@@ -1,4 +1,7 @@
-# RVX Music (Anddea YT Music): name "RVX Music", Revancify Red icon.
+# RVX Music (Anddea YT Music): launcher name "RVX Music", Revancify Red icon,
+# in-app settings menu label "RVX App" (default is "RVX").
 + Custom branding for YouTube Music
 @customName=RVX Music
 @appIcon=revancify_red
++ Settings for YouTube Music
+@rvxSettingsLabel=RVX App
