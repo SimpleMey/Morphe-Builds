@@ -162,6 +162,16 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
                 enable_args.extend(_enable_opts)
                 enable_args.extend(["-e", _enable_name])
 
+    # RVX (anddea) apps can be signed with the user's own keystore (from repo secrets) so that
+    # existing RVX users get seamless in-place updates. ReVanced-based managers export BKS
+    # keystores, which apksigner cannot read but morphe-cli (BouncyCastle) can, so for RVX we
+    # sign via morphe-cli and skip the apksigner re-sign.
+    rvx_custom_ks = bool(name == "anddea" and getenv("RVX_KEYSTORE_PATH"))
+    rvx_ks_path = getenv("RVX_KEYSTORE_PATH", "")
+    rvx_ks_pass = getenv("RVX_KEYSTORE_PASSWORD", "")
+    rvx_ks_alias = getenv("RVX_KEY_ALIAS", "")
+    rvx_key_pass = getenv("RVX_KEY_PASSWORD", "") or rvx_ks_pass
+
     for attempt_idx, ver in enumerate(versions_to_try):
         if attempt_idx > 0:
             logging.warning(
@@ -283,6 +293,14 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
                     "--out", str(output_apk), str(input_apk),
                     *enable_args, *disable_args
                 ]
+                if rvx_custom_ks:
+                    # Sign with the user's keystore (morphe-cli reads BKS natively).
+                    morphe_cmd += [
+                        "--keystore", rvx_ks_path,
+                        "--keystore-password", rvx_ks_pass,
+                        "--keystore-entry-alias", rvx_ks_alias,
+                        "--keystore-entry-password", rvx_key_pass,
+                    ]
                 utils.run_process(morphe_cmd, capture=True, stream=True)
             else:
                 logging.info("🔧 Using ReVanced patching system...")
@@ -327,44 +345,37 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
         else:
             signed_apk = Path(f"{app_name}-{arch}-{name}-v{version}.apk")
 
-        apksigner = utils.find_apksigner()
-        if not apksigner:
-            raise RuntimeError("apksigner not found")
+        if rvx_custom_ks:
+            # morphe-cli already aligned and signed the APK with the user's keystore, so just
+            # rename it to the final name (apksigner cannot load the BKS keystore).
+            logging.info("RVX build signed by morphe-cli with the custom keystore.")
+            output_apk.rename(signed_apk)
+        else:
+            apksigner = utils.find_apksigner()
+            if not apksigner:
+                raise RuntimeError("apksigner not found")
+            try:
+                utils.run_process([
+                    str(apksigner), "sign", "--verbose",
+                    "--ks", "keystore/public.jks",
+                    "--ks-pass", "pass:public",
+                    "--key-pass", "pass:public",
+                    "--ks-key-alias", "public",
+                    "--in", str(output_apk), "--out", str(signed_apk)
+                ], capture=True, stream=True)
+            except Exception as e:
+                logging.warning(f"Standard signing failed: {e}")
+                logging.info("Trying alternative signing method...")
 
-        # Signing keystore. RVX (anddea) builds use the user's own keystore when it is provided
-        # via secrets/env (RVX_KEYSTORE_PATH + passwords + alias), so existing RVX users get a
-        # seamless in-place update. Everything else -- and RVX when no keystore is set -- uses
-        # the repo's bundled public keystore.
-        ks_path, ks_pass, key_pass, ks_alias = "keystore/public.jks", "public", "public", "public"
-        if name == "anddea" and getenv("RVX_KEYSTORE_PATH"):
-            ks_path = getenv("RVX_KEYSTORE_PATH")
-            ks_pass = getenv("RVX_KEYSTORE_PASSWORD", "")
-            key_pass = getenv("RVX_KEY_PASSWORD", ks_pass)
-            ks_alias = getenv("RVX_KEY_ALIAS", "")
-            logging.info(f"Signing RVX build with the custom keystore (alias: {ks_alias})")
-
-        try:
-            utils.run_process([
-                str(apksigner), "sign", "--verbose",
-                "--ks", ks_path,
-                "--ks-pass", f"pass:{ks_pass}",
-                "--key-pass", f"pass:{key_pass}",
-                "--ks-key-alias", ks_alias,
-                "--in", str(output_apk), "--out", str(signed_apk)
-            ], capture=True, stream=True)
-        except Exception as e:
-            logging.warning(f"Standard signing failed: {e}")
-            logging.info("Trying alternative signing method...")
-
-            utils.run_process([
-                str(apksigner), "sign", "--verbose",
-                "--min-sdk-version", "21",
-                "--ks", ks_path,
-                "--ks-pass", f"pass:{ks_pass}",
-                "--key-pass", f"pass:{key_pass}",
-                "--ks-key-alias", ks_alias,
-                "--in", str(output_apk), "--out", str(signed_apk)
-            ], capture=True, stream=True)
+                utils.run_process([
+                    str(apksigner), "sign", "--verbose",
+                    "--min-sdk-version", "21",
+                    "--ks", "keystore/public.jks",
+                    "--ks-pass", "pass:public",
+                    "--key-pass", "pass:public",
+                    "--ks-key-alias", "public",
+                    "--in", str(output_apk), "--out", str(signed_apk)
+                ], capture=True, stream=True)
 
         output_apk.unlink(missing_ok=True)
         print(f"✅ APK built: {signed_apk.name}")
