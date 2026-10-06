@@ -135,16 +135,22 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
 
     exclude_patches = []
     include_patches = []
+    option_args = []
 
     patches_path = Path("patches") / f"{app_name}-{source}.txt"
     if patches_path.exists():
         with patches_path.open('r') as patches_file:
             for line in patches_file:
                 line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
                 if line.startswith('-'):
                     exclude_patches.extend(["-d", line[1:].strip()])
                 elif line.startswith('+'):
                     include_patches.extend(["-e", line[1:].strip()])
+                elif line.startswith('@'):
+                    # Patch option, e.g. "@customName=RVX App" -> -O "customName=RVX App"
+                    option_args.extend(["-O", line[1:].strip()])
 
     for attempt_idx, ver in enumerate(versions_to_try):
         if attempt_idx > 0:
@@ -265,7 +271,7 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
                     "java", "-jar", str(cli),
                     "patch", "--patches", str(patches),
                     "--out", str(output_apk), str(input_apk),
-                    *exclude_patches, *include_patches
+                    *exclude_patches, *include_patches, *option_args
                 ]
                 utils.run_process(morphe_cmd, capture=True, stream=True)
             else:
@@ -280,14 +286,14 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
                         "java", "-jar", str(cli),
                         "patch", "-p", str(patches), "-b",
                         "--out", str(output_apk), str(input_apk),
-                        *exclude_patches, *include_patches
+                        *exclude_patches, *include_patches, *option_args
                     ], capture=True, stream=True)
                 else:
                     utils.run_process([
                         "java", "-jar", str(cli),
                         "patch", "--patches", str(patches),
                         "--out", str(output_apk), str(input_apk),
-                        *exclude_patches, *include_patches
+                        *exclude_patches, *include_patches, *option_args
                     ], capture=True, stream=True)
 
         except subprocess.CalledProcessError as e:
@@ -302,7 +308,14 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
         # Patch succeeded -> cleanup input and sign.
         input_apk.unlink(missing_ok=True)
 
-        signed_apk = Path(f"{app_name}-{arch}-{name}-v{version}.apk")
+        if name == "anddea":
+            # RVX builds get their own filenames, e.g. rvx-app-anddea-v<ver>.apk and
+            # rvx-music-anddea-arm64-v8a-v<ver>.apk (universal arch is omitted).
+            rvx_name = {"youtube": "rvx-app", "youtube-music": "rvx-music"}.get(app_name, app_name)
+            arch_suffix = "" if arch == "universal" else f"-{arch}"
+            signed_apk = Path(f"{rvx_name}-{name}{arch_suffix}-v{version}.apk")
+        else:
+            signed_apk = Path(f"{app_name}-{arch}-{name}-v{version}.apk")
 
         apksigner = utils.find_apksigner()
         if not apksigner:
