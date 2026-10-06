@@ -1,4 +1,5 @@
-# RVX App (Anddea YouTube): branded "RVX App", Revancify Red icon, Theme patch removed.
-- Theme
+# RVX App (Anddea YouTube): name "RVX App", Revancify Red icon, Theme patch removed.
++ Custom branding for YouTube
 @customName=RVX App
 @appIcon=revancify_red
+- Theme

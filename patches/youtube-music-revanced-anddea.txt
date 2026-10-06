@@ -1,3 +1,4 @@
-# RVX Music (Anddea YT Music): branded "RVX Music", Revancify Red icon.
+# RVX Music (Anddea YT Music): name "RVX Music", Revancify Red icon.
++ Custom branding for YouTube Music
 @customName=RVX Music
 @appIcon=revancify_red

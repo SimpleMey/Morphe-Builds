@@ -133,9 +133,13 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
     if candidates and version in candidates:
         versions_to_try += [v for v in candidates if v != version]
 
-    exclude_patches = []
-    include_patches = []
-    option_args = []
+    # morphe-cli grammar: options (-O) are bound to the patch enabled right after them,
+    # i.e. "-O key=value ... -e <PatchName>". So we collect each "+ PatchName" together
+    # with its following "@key=value" options, emitting the options before the -e.
+    disable_args = []
+    enable_args = []
+    _enable_name = None
+    _enable_opts = []
 
     patches_path = Path("patches") / f"{app_name}-{source}.txt"
     if patches_path.exists():
@@ -144,13 +148,19 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
                 line = line.strip()
                 if not line or line.startswith('#'):
                     continue
-                if line.startswith('-'):
-                    exclude_patches.extend(["-d", line[1:].strip()])
-                elif line.startswith('+'):
-                    include_patches.extend(["-e", line[1:].strip()])
+                if line.startswith('+'):
+                    if _enable_name is not None:
+                        enable_args.extend(_enable_opts)
+                        enable_args.extend(["-e", _enable_name])
+                    _enable_name = line[1:].strip()
+                    _enable_opts = []
                 elif line.startswith('@'):
-                    # Patch option, e.g. "@customName=RVX App" -> -O "customName=RVX App"
-                    option_args.extend(["-O", line[1:].strip()])
+                    _enable_opts.extend(["-O", line[1:].strip()])
+                elif line.startswith('-'):
+                    disable_args.extend(["-d", line[1:].strip()])
+            if _enable_name is not None:
+                enable_args.extend(_enable_opts)
+                enable_args.extend(["-e", _enable_name])
 
     for attempt_idx, ver in enumerate(versions_to_try):
         if attempt_idx > 0:
@@ -271,7 +281,7 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
                     "java", "-jar", str(cli),
                     "patch", "--patches", str(patches),
                     "--out", str(output_apk), str(input_apk),
-                    *exclude_patches, *include_patches, *option_args
+                    *enable_args, *disable_args
                 ]
                 utils.run_process(morphe_cmd, capture=True, stream=True)
             else:
@@ -286,14 +296,14 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
                         "java", "-jar", str(cli),
                         "patch", "-p", str(patches), "-b",
                         "--out", str(output_apk), str(input_apk),
-                        *exclude_patches, *include_patches, *option_args
+                        *enable_args, *disable_args
                     ], capture=True, stream=True)
                 else:
                     utils.run_process([
                         "java", "-jar", str(cli),
                         "patch", "--patches", str(patches),
                         "--out", str(output_apk), str(input_apk),
-                        *exclude_patches, *include_patches, *option_args
+                        *enable_args, *disable_args
                     ], capture=True, stream=True)
 
         except subprocess.CalledProcessError as e:
