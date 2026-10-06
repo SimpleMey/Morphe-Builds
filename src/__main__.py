@@ -331,13 +331,25 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
         if not apksigner:
             raise RuntimeError("apksigner not found")
 
+        # Signing keystore. RVX (anddea) builds use the user's own keystore when it is provided
+        # via secrets/env (RVX_KEYSTORE_PATH + passwords + alias), so existing RVX users get a
+        # seamless in-place update. Everything else -- and RVX when no keystore is set -- uses
+        # the repo's bundled public keystore.
+        ks_path, ks_pass, key_pass, ks_alias = "keystore/public.jks", "public", "public", "public"
+        if name == "anddea" and getenv("RVX_KEYSTORE_PATH"):
+            ks_path = getenv("RVX_KEYSTORE_PATH")
+            ks_pass = getenv("RVX_KEYSTORE_PASSWORD", "")
+            key_pass = getenv("RVX_KEY_PASSWORD", ks_pass)
+            ks_alias = getenv("RVX_KEY_ALIAS", "")
+            logging.info(f"Signing RVX build with the custom keystore (alias: {ks_alias})")
+
         try:
             utils.run_process([
                 str(apksigner), "sign", "--verbose",
-                "--ks", "keystore/public.jks",
-                "--ks-pass", "pass:public",
-                "--key-pass", "pass:public",
-                "--ks-key-alias", "public",
+                "--ks", ks_path,
+                "--ks-pass", f"pass:{ks_pass}",
+                "--key-pass", f"pass:{key_pass}",
+                "--ks-key-alias", ks_alias,
                 "--in", str(output_apk), "--out", str(signed_apk)
             ], capture=True, stream=True)
         except Exception as e:
@@ -347,10 +359,10 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
             utils.run_process([
                 str(apksigner), "sign", "--verbose",
                 "--min-sdk-version", "21",
-                "--ks", "keystore/public.jks",
-                "--ks-pass", "pass:public",
-                "--key-pass", "pass:public",
-                "--ks-key-alias", "public",
+                "--ks", ks_path,
+                "--ks-pass", f"pass:{ks_pass}",
+                "--key-pass", f"pass:{key_pass}",
+                "--ks-key-alias", ks_alias,
                 "--in", str(output_apk), "--out", str(signed_apk)
             ], capture=True, stream=True)
 

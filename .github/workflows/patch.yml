@@ -177,6 +177,23 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
+      # Optional: sign RVX (anddea) apps with the user's own keystore so existing RVX users
+      # can update in place. Add repo secret RVX_KEYSTORE_BASE64 (base64 of your .jks) plus
+      # RVX_KEYSTORE_PASSWORD / RVX_KEY_PASSWORD / RVX_KEY_ALIAS. Without the secret, RVX apps
+      # keep using the bundled public keystore.
+      - name: Set up RVX keystore (optional)
+        env:
+          RVX_KEYSTORE_BASE64: ${{ secrets.RVX_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$RVX_KEYSTORE_BASE64" ]; then
+            mkdir -p keystore
+            echo "$RVX_KEYSTORE_BASE64" | base64 -d > keystore/rvx.jks
+            echo "RVX_KEYSTORE_PATH=keystore/rvx.jks" >> "$GITHUB_ENV"
+            echo "RVX keystore configured; RVX apps will be signed with it."
+          else
+            echo "No RVX_KEYSTORE_BASE64 secret; RVX apps use the default public keystore."
+          fi
+
       - name: Build APK
         env:
           APP_NAME: ${{ matrix.app_name }}
@@ -184,6 +201,9 @@ jobs:
           ARCH: ${{ matrix.arch }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TRAWL_URL: http://localhost:8191
+          RVX_KEYSTORE_PASSWORD: ${{ secrets.RVX_KEYSTORE_PASSWORD }}
+          RVX_KEY_PASSWORD: ${{ secrets.RVX_KEY_PASSWORD }}
+          RVX_KEY_ALIAS: ${{ secrets.RVX_KEY_ALIAS }}
         run: |
           echo "Building ${{ matrix.app_name }} with ${{ matrix.source }}..."
           sleep $((RANDOM % 30)).$((RANDOM % 100))
