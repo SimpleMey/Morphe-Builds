@@ -351,58 +351,52 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "📝 Generating release notes..."
-
-          if [ "${{ steps.check-release.outputs.release_exists }}" = "true" ]; then
-            gh release view latest --json assets --jq '.assets[].name' > current_assets.txt
-          else
-            : > current_assets.txt
-          fi
-
-          for apk in ./release-apks/*.apk; do
-            [ -f "$apk" ] || continue
-            basename "$apk" >> current_assets.txt
-          done
-
-          if [ -f ./release-apks/manifest.json ]; then
-            echo "manifest.json" >> current_assets.txt
-          fi
-
-          sort -u current_assets.txt > release_assets.txt
+          echo "Generating release notes..."
 
           cat > release_notes.md << 'EOF'
           # Morphe APKs - Auto Built
-          
-          ## 📱 Available Apps
-          
+
           EOF
 
-          while read -r filename; do
-            [ -n "$filename" ] || continue
-            echo "- $filename" >> release_notes.md
-          done < release_assets.txt
+          # Per-app Changelog section from manifest.json (one dropdown per app).
+          # Falls back to a plain asset list if the manifest is unavailable.
+          if [ -f ./release-apks/manifest.json ] && \
+             python scripts/generate_changelog.py --manifest ./release-apks/manifest.json --out changelog_section.md; then
+            cat changelog_section.md >> release_notes.md
+          else
+            echo "Changelog unavailable; writing a plain app list."
+            if [ "${{ steps.check-release.outputs.release_exists }}" = "true" ]; then
+              gh release view latest --json assets --jq '.assets[].name' > current_assets.txt
+            else
+              : > current_assets.txt
+            fi
+            for apk in ./release-apks/*.apk; do
+              [ -f "$apk" ] || continue
+              basename "$apk" >> current_assets.txt
+            done
+            sort -u current_assets.txt > release_assets.txt
+            {
+              echo "## Available apps"
+              echo ""
+              while read -r filename; do
+                [ -n "$filename" ] || continue
+                echo "- $filename"
+              done < release_assets.txt
+            } >> release_notes.md
+          fi
 
           cat >> release_notes.md << 'EOF'
-          ---
-          
-          ## ⚙️ Build Information
-          - **Auto-built daily at 6 AM UTC**
-          - **Multiple architecture support** (arm64-v8a, armeabi-v7a, universal)
-          - **Latest Morphe patches**
-          - **Updated automatically**
-          
-          ## 📊 Architecture Guide
-          - **arm64-v8a**: Modern ARM devices (2014+)
-          - **armeabi-v7a**: Older ARM devices
-          - **universal**: All ARM devices (larger file)
-          
-          ## ⚠️ Disclaimer
+
+          ## Build information
+          Auto built daily at 6 AM UTC. Architectures: arm64-v8a, armeabi-v7a, universal.
+
+          ## Architecture guide
+          arm64-v8a: modern ARM devices (2014 and newer)
+          armeabi-v7a: older ARM devices
+          universal: all ARM devices (larger file)
+
+          ## Disclaimer
           These APKs are built automatically. Use at your own risk.
-          
-          ## 🔄 Update Schedule
-          - Automatic updates daily at 6 AM UTC
-          - Manual updates available via workflow dispatch
-          - Creates `latest` if missing and uploads rebuilt assets in place
           EOF
       
       - name: Upload Or Create Release
