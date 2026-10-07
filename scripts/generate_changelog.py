@@ -27,9 +27,23 @@ missing or has no usable entries, so the workflow can fall back to a plain list.
 """
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
+
+
+# Strip emojis / pictographs / variation selectors from upstream notes so the
+# generated release body stays emoji-free. Arrows (U+2190..U+21FF) are kept since
+# changelogs sometimes use them in prose. A run of emoji plus one trailing space
+# is removed together, so "### 🐛 Bug Fixes" becomes "### Bug Fixes".
+_EMOJI_RE = re.compile(
+    "[\U0001F000-\U0001FAFF☀-➿⌀-⏿⬀-⯿︀-️‍]+ ?"
+)
+
+
+def strip_emoji(text: str) -> str:
+    return _EMOJI_RE.sub("", text or "")
 
 
 # Friendly display name per (app_name, source). Falls back to a generated name.
@@ -147,7 +161,7 @@ def load_apps(manifest_path: Path):
 
 
 def trim_body(body: str, url: str) -> str:
-    body = (body or "").strip()
+    body = strip_emoji(body or "").strip()
     if not body:
         return "_No changelog provided for this release._"
     if len(body) > BODY_LIMIT:
