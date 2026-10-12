@@ -102,26 +102,14 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
     logging.info(f"✅ Using CLI: {cli.name}")
     logging.info(f"✅ Using patches: {patches.name}")
 
-    download_methods = [
-        downloader.download_apkmirror,
-        downloader.download_aptoide,
-        downloader.download_github,
-        downloader.download_uptodown,
-        downloader.download_apkpure,
-        downloader.download_apkcombo,
-    ]
+    # Download the APK, preferring the newest supported version across ALL mirrors
+    # before downgrading. A mirror missing the newest version must not silently
+    # drop the build to an older one (see downloader.download_best).
+    input_apk, version, candidates = downloader.download_best(
+        app_name, str(cli), str(patches), arch
+    )
 
-    input_apk = None
-    version = None
-    candidates: list[str] = []
-    used_method = None
-    for method in download_methods:
-        input_apk, version, candidates = method(app_name, str(cli), str(patches), arch)
-        if input_apk:
-            used_method = method
-            break
-
-    if input_apk is None or not used_method or not version:
+    if input_apk is None or not version:
         logging.error(f"❌ Failed to download APK for {app_name}")
         logging.error("All download sources failed. Skipping this app.")
         return None
@@ -183,7 +171,7 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
             except Exception:
                 pass
 
-            input_apk, version, _ = used_method(app_name, str(cli), str(patches), arch, override_version=ver)
+            input_apk, version, _ = downloader.download_best(app_name, str(cli), str(patches), arch, override_version=ver)
             if input_apk is None:
                 continue
             version = ver

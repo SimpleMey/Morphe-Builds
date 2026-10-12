@@ -271,6 +271,78 @@ def download_apkcombo(
 ) -> tuple[Path | None, str | None, list[str]]:
     return download_platform(app_name, "apkcombo", cli, patches, arch, override_version)
 
+# Provider order, highest-priority first. Each is tried for the preferred version
+# before any lower version is attempted.
+_PROVIDER_ORDER = ["apkmirror", "aptoide", "github", "uptodown", "apkpure", "apkcombo"]
+
+
+def _first_app_config(app_name: str) -> dict | None:
+    """First available apps/<platform>/<app>.json config (for package + version)."""
+    for platform in _PROVIDER_ORDER:
+        p = Path("apps") / platform / f"{app_name}.json"
+        if p.exists():
+            try:
+                with p.open() as f:
+                    return json.load(f)
+            except Exception:
+                continue
+    return None
+
+
+def download_best(
+    app_name: str,
+    cli: str,
+    patches: str,
+    arch: str = None,
+    override_version: str = None,
+) -> tuple[Path | None, str | None, list[str]]:
+    """Download the APK for (app, patches), preferring the newest supported version
+    across ALL providers before downgrading.
+
+    This iterates versions as the OUTER loop and providers as the inner loop, so a
+    mirror that is missing the preferred version cannot silently downgrade the
+    build: every provider is tried for a given version first, and only if none of
+    them has it do we move on to the next (lower) supported version. If nothing in
+    the supported list is downloadable anywhere, it falls back to the per-provider
+    path (which also considers each store's own "latest").
+    """
+    cfg = _first_app_config(app_name)
+    package = (cfg or {}).get("package") or ""
+    pinned = ((cfg or {}).get("version") or "").strip()
+
+    if override_version:
+        versions = [override_version]
+    elif pinned:
+        versions = [pinned]
+    elif package:
+        versions = utils.get_supported_versions(package, cli, patches)
+    else:
+        versions = []
+
+    for version in versions:
+        if not version:
+            continue
+        for platform in _PROVIDER_ORDER:
+            input_apk, got_ver, _ = download_platform(
+                app_name, platform, cli, patches, arch, override_version=version
+            )
+            if input_apk:
+                logging.info(f"✅ Got {app_name} {got_ver} from {platform}")
+                return input_apk, got_ver, versions
+
+    # Nothing from the supported list downloaded anywhere: fall back to the
+    # per-provider path (each provider also tries its store's latest version).
+    for platform in _PROVIDER_ORDER:
+        input_apk, got_ver, cands = download_platform(
+            app_name, platform, cli, patches, arch, override_version=override_version
+        )
+        if input_apk:
+            logging.info(f"✅ Got {app_name} {got_ver} from {platform} (fallback)")
+            return input_apk, got_ver, (versions or cands)
+
+    return None, None, versions
+
+
 def download_apkeditor() -> Path:
     max_retries = 3
     for attempt in range(max_retries):
