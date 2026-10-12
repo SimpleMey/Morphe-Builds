@@ -45,14 +45,13 @@ import sys
 from pathlib import Path
 from typing import List, Set
 
-# APK names look like: {app}-{arch}-{name}-v{version}.apk
-# We want to keep everything up to the version marker as the "identity".
-# The version marker must be restricted to genuine version characters (digits,
-# dots, parentheses for build numbers, hyphen, plus) so that the architecture
-# tokens "v8a"/"v7a" inside arm64-v8a / armeabi-v7a do NOT match (they have a
-# letter right after the digit, e.g. "v8a"). Otherwise the identity prefix would
-# be truncated at the arch segment.
-VERSION_MARKER = re.compile(r"-v\d[\d.()+\-]*\.apk$", re.IGNORECASE)
+# APK names look like: {app}-{arch}-{name}-v{version}.apk. The identity is
+# everything before the trailing "-v{version}.apk". The version can contain
+# letters (e.g. piko's "-v12.30.0-prod.01"), so the version part allows word
+# characters; the greedy ".*" prefix binds the match to the LAST "-v<digit>"
+# token, which keeps arch tokens like "v8a"/"v7a" inside the identity (there is a
+# later "-v<version>" after them) instead of truncating there.
+VERSION_MARKER = re.compile(r"^(?P<id>.*)-v(?P<ver>\d[\w.+()\-]*)\.apk$", re.IGNORECASE)
 
 
 def gh_release_assets(release: str) -> List[dict]:
@@ -75,8 +74,18 @@ def identity_prefix(apk_name: str) -> str:
     """Return the identity prefix of an APK filename (everything before the
     version marker). E.g. ``youtube-arm64-v8a-morphe-v2.5.0.apk`` ->
     ``youtube-arm64-v8a-morphe``. Falls back to the stem if no marker matches."""
-    m = VERSION_MARKER.search(apk_name)
-    return (apk_name[: m.start()] if m else Path(apk_name).stem).lower()
+    m = VERSION_MARKER.match(apk_name)
+    return (m.group("id") if m else Path(apk_name).stem).lower()
+
+
+def version_key(apk_name: str) -> tuple:
+    """Sortable version key for an APK (higher is newer). Uses the integer groups
+    of the version token, e.g. "12.30.0-prod.01" -> (12, 30, 0, 1). Names with no
+    recognisable version sort lowest."""
+    m = VERSION_MARKER.match(apk_name)
+    if not m:
+        return ()
+    return tuple(int(x) for x in re.findall(r"\d+", m.group("ver")))
 
 
 def load_keep_set(keep_file: Path) -> Set[str]:
@@ -197,6 +206,33 @@ def main() -> int:
         elif identity_prefix(name) in keep_prefixes:
             to_delete.append(asset)  # same app/arch, but a different (older) version
         # else: an app/arch we didn't rebuild this run -> leave it untouched
+
+    # Dedupe pass: for each app/arch identity, keep only the newest version in the
+    # release. This also removes older duplicates of apps that were NOT rebuilt
+    # this run (for example a version with a non-numeric suffix like piko's
+    # "-prod.01" that an earlier marker-regex missed, leaving two copies behind).
+    # Keep-set members are always preserved and count as the newest.
+    from collections import defaultdict
+    already = {str(a.get("name", "")) for a in to_delete}
+    groups: dict = defaultdict(list)
+    for asset in assets:
+        name = str(asset.get("name", ""))
+        if name:
+            groups[identity_prefix(name)].append(asset)
+    for grp in groups.values():
+        if len(grp) <= 1:
+            continue
+        kept = next((a for a in grp if str(a.get("name", "")) in keep), None)
+        if kept is None:
+            kept = max(grp, key=lambda a: version_key(str(a.get("name", ""))))
+        kept_name = str(kept.get("name", ""))
+        for asset in grp:
+            name = str(asset.get("name", ""))
+            if name == kept_name or name in keep or name in already:
+                continue
+            to_delete.append(asset)
+            already.add(name)
+            print(f"  dedupe {name}: older than {kept_name}")
 
     if not to_delete:
         print("No superseded APK assets found.")
