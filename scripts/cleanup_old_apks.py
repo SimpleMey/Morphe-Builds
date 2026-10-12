@@ -15,16 +15,22 @@ accumulated indefinitely.
 
 Strategy
 --------
-For every newly-built APK, derive its *identity prefix*
-``{app}-{arch}-`` (everything before ``-v{version}.apk``) and delete any *other*
-APK in the release that shares that prefix but is not in the keep-set. This is
-identity-based, so v2.5 correctly supersedes v2.4.
+Group assets by *identity prefix* ``{app}-{arch}-`` (everything before
+``-v{version}.apk``) and, within each group, keep only the newest ``--keep-versions``
+versions (default 2 = current + previous); delete the rest. This is identity-based,
+so e.g. v2.6 and v2.5 are kept while v2.4 is pruned.
+
+Run this AFTER the build uploads the new APK, so the fresh version is counted and
+the PREVIOUS version is retained until the NEXT update supersedes it. That overlap
+keeps an already-published download link (VMPro, or the WordPress/Sinker feed)
+working across a rebuild instead of 404ing. The ``manifest.json`` still points at the
+newest version, so the retained older APK is just an orphan download for the window.
 
 Inputs
 ------
-- ``--keep-file``: a newline-delimited file of APK basenames to PRESERVE
-  (typically ``release-apks/current_assets.txt``). Anything listed here is never
-  deleted.
+- ``--keep-file``: a newline-delimited file of APK basenames to PRESERVE (this run's
+  freshly built APKs). Anything listed here is never deleted and counts as newest.
+- ``--keep-versions``: how many newest versions to keep per identity (default 2).
 - ``--release``: release tag to clean (default ``latest``).
 
 The current APK asset names are read via ``gh release view --json assets`` so we
@@ -174,19 +180,20 @@ def main() -> int:
                              "regardless of its identity prefix. Use this for permanently "
                              "renamed/retired naming schemes (e.g. 'revanced-anddea' after it "
                              "was renamed to 'rvx-app'/'rvx-music'). Repeatable.")
+    parser.add_argument("--keep-versions", type=int, default=2,
+                        help="number of newest versions to keep per app/arch identity "
+                             "(default: 2 -> current + previous, so an already-published "
+                             "download link survives one update cycle before it is pruned).")
     parser.add_argument("--dry-run", action="store_true", help="list deletions without performing them")
     args = parser.parse_args()
 
     keep = load_keep_set(Path(args.keep_file))
     assets = gh_release_assets(args.release)  # list of {name, id, ...} dicts
+    keep_versions = max(1, args.keep_versions)
 
     if not assets:
         print("No existing APK assets to clean up.")
         return 0
-
-    # Identity prefixes that must be preserved (one or more of the keep-set may
-    # share a prefix when multiple arches of the same app are kept).
-    keep_prefixes = {identity_prefix(n) for n in keep}
 
     # Compile retire patterns (permanently-retired naming schemes).
     retire_patterns = []
@@ -197,42 +204,50 @@ def main() -> int:
             print(f"⚠️  ignoring invalid --retire pattern {pat!r}: {e}", file=sys.stderr)
 
     to_delete = []  # list of asset dicts
+    already: set = set()
+
+    # 1. Retire pass: permanently-renamed/retired naming schemes are always removed
+    #    (unless explicitly kept), regardless of version.
     for asset in assets:
         name = str(asset.get("name", ""))
-        if not name or name in keep:
-            continue  # explicitly kept (or unnamed)
+        if not name or name in keep or name in already:
+            continue
         if any(p.search(name) for p in retire_patterns):
-            to_delete.append(asset)  # retired naming scheme -> always remove
-        elif identity_prefix(name) in keep_prefixes:
-            to_delete.append(asset)  # same app/arch, but a different (older) version
-        # else: an app/arch we didn't rebuild this run -> leave it untouched
+            to_delete.append(asset)
+            already.add(name)
 
-    # Dedupe pass: for each app/arch identity, keep only the newest version in the
-    # release. This also removes older duplicates of apps that were NOT rebuilt
-    # this run (for example a version with a non-numeric suffix like piko's
-    # "-prod.01" that an earlier marker-regex missed, leaving two copies behind).
-    # Keep-set members are always preserved and count as the newest.
+    # 2. Keep the newest `keep_versions` versions of each app/arch identity; delete
+    #    older ones. This runs AFTER the build's upload, so the freshly built version
+    #    is counted and the PREVIOUS version is retained until the NEXT update
+    #    supersedes it. That overlap keeps already-published download links (VMPro,
+    #    the WordPress/Sinker feed) alive across a rebuild instead of 404ing. The
+    #    manifest still points at the newest version, so the older APK is just an
+    #    orphan download for the overlap window. Keep-set members (this run's APKs)
+    #    are always preserved and counted toward the kept versions.
     from collections import defaultdict
-    already = {str(a.get("name", "")) for a in to_delete}
     groups: dict = defaultdict(list)
     for asset in assets:
         name = str(asset.get("name", ""))
         if name:
             groups[identity_prefix(name)].append(asset)
-    for grp in groups.values():
-        if len(grp) <= 1:
-            continue
-        kept = next((a for a in grp if str(a.get("name", "")) in keep), None)
-        if kept is None:
-            kept = max(grp, key=lambda a: version_key(str(a.get("name", ""))))
-        kept_name = str(kept.get("name", ""))
-        for asset in grp:
+    for ident, grp in groups.items():
+        # Newest first; keep-set members sort ahead of everything so they survive.
+        ordered = sorted(
+            grp,
+            key=lambda a: (str(a.get("name", "")) in keep, version_key(str(a.get("name", "")))),
+            reverse=True,
+        )
+        survivors = 0
+        for asset in ordered:
             name = str(asset.get("name", ""))
-            if name == kept_name or name in keep or name in already:
+            if name in already:
+                continue  # already retired above
+            if survivors < keep_versions or name in keep:
+                survivors += 1
                 continue
             to_delete.append(asset)
             already.add(name)
-            print(f"  dedupe {name}: older than {kept_name}")
+            print(f"  prune {name}: keeping newest {keep_versions} of {ident}")
 
     if not to_delete:
         print("No superseded APK assets found.")

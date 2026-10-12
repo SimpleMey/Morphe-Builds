@@ -429,34 +429,34 @@ jobs:
           if [ "${{ steps.check-release.outputs.release_exists }}" = "true" ]; then
             echo "⬆️ Uploading rebuilt assets in place and refreshing release metadata..."
 
-            # Delete superseded older-version APKs. The previous loop only deleted
-            # assets whose filename EXACTLY matched a new APK; since APK names
-            # embed the version, old versions (e.g. v2.4.0) never matched the new
-            # v2.5.0 and accumulated forever. cleanup_old_apks.py deletes any
-            # release APK sharing a {app}-{arch}- identity prefix with a new APK
-            # but with a different version.
+            # Upload the new (versioned) APKs + manifest alongside the existing ones.
+            gh release upload latest "${ASSETS[@]}" --clobber
+            gh release edit latest \
+              --title "Morphe APKs - $(date -u +'%Y-%m-%d %H:%M') UTC" \
+              --notes-file release_notes.md
+
+            # Keep the newest 2 versions of each app/arch; delete older ones. This
+            # runs AFTER the upload, so the just-built version is counted and the
+            # PREVIOUS version is retained until the NEXT update supersedes it. That
+            # overlap keeps already-published download links (VMPro, the WordPress/
+            # Sinker feed) working across a rebuild instead of 404ing. The manifest
+            # points at the newest version, so the retained older APK is just an
+            # orphan download for the window.
+            # --retire additionally removes permanently-renamed schemes: the anddea
+            # RVX apps were renamed youtube*-revanced-anddea-*.apk ->
+            # rvx-app/rvx-music-anddea-*.apk, so old-named copies would linger forever.
             : > keep_apks.txt
             for apk in ./release-apks/*.apk; do
               [ -f "$apk" ] || continue
               basename "$apk" >> keep_apks.txt
             done
-            # --retire removes permanently-renamed assets whose identity prefix no
-            # longer matches any new build. The anddea RVX apps were renamed from
-            # youtube*-revanced-anddea-*.apk to rvx-app/rvx-music-anddea-*.apk, so the
-            # old-named copies would otherwise linger forever.
             python scripts/cleanup_old_apks.py --release latest --keep-file keep_apks.txt \
-              --retire 'revanced-anddea.*\.apk$' || \
-              echo "⚠️  cleanup_old_apks.py failed; continuing with exact-name cleanup"
-
-            # Upload new APKs and manifest
-            gh release upload latest "${ASSETS[@]}" --clobber
-            gh release edit latest \
-              --title "Morphe APKs - $(date +'%Y-%m-%d %H:%M')" \
-              --notes-file release_notes.md
+              --keep-versions 2 --retire 'revanced-anddea.*\.apk$' || \
+              echo "⚠️  cleanup_old_apks.py failed; older versions may remain this run"
           else
             echo "🆕 Creating 'latest' release..."
             gh release create "latest" \
-              --title "Morphe APKs - $(date +'%Y-%m-%d %H:%M')" \
+              --title "Morphe APKs - $(date -u +'%Y-%m-%d %H:%M') UTC" \
               --notes-file release_notes.md \
               "${ASSETS[@]}" \
               --latest

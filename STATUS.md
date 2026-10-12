@@ -19,8 +19,10 @@
 - App versions are not pinned. The builder asks the patches which versions they support and downloads the newest supported version it can fetch, trying every mirror for that version before considering a lower one. A single mirror missing the newest version no longer downgrades the build.
 
 ## Release output
-- All APKs plus `manifest.json` are published to the single `latest` release.
-- Superseded copies are cleaned up automatically: only the newest version per app and architecture is kept.
+- All APKs plus `manifest.json` are published to the single `latest` release. Filenames keep the version, e.g. `youtube-arm64-v8a-morphe-v2.5.0.apk`.
+- Cleanup keeps the newest 2 versions of each app and architecture (current + previous); older ones are deleted. The cleanup runs after the upload, so when an app updates, its previous version stays until the NEXT update replaces it.
+- Why keep 2: a download link already published elsewhere (VMPro, or the WordPress/Sinker feed) keeps working across a rebuild instead of 404ing. The link to the previous version survives one full update cycle, which is far longer than the feed takes to refresh. The `manifest.json` always points at the newest version, so VMPro and the changelog show the newest; the retained older APK is just an extra download for the overlap window.
+- Only an app that updates twice before the feed refreshes could expose a stale link; raise `--keep-versions` in the workflow if more overlap is ever needed.
 
 ## Apps and sources
 - Morphe: YouTube, YouTube Music, Reddit (`MorpheApp/morphe-patches`).
