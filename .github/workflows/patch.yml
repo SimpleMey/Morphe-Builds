@@ -12,7 +12,9 @@ on:
         required: false
         default: false
   schedule:
-    - cron: '0 6 * * *'  # Daily at 6 AM UTC
+    # 03:17 UTC (08:47 IST). Off-peak minute (not :00) and a low-traffic hour
+    # (US and EU off-hours) so GitHub does not delay the scheduled run. See STATUS.md.
+    - cron: '17 3 * * *'
 
 jobs:
   download-tools:
