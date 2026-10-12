@@ -243,7 +243,7 @@ jobs:
           if-no-files-found: ignore
 
   create-single-release:
-    name: Create Single Release
+    name: Create Rolling Release
     needs: [check-updates, build-apps]
     runs-on: ubuntu-latest
     if: always() && needs.check-updates.outputs.has_updates == 'true'
@@ -301,6 +301,30 @@ jobs:
           final_count=$(ls -1 ./release-apks/*.apk 2>/dev/null | wc -l || echo "0")
           echo "📊 Total APKs: $final_count"
 
+      - name: Carry Over Unchanged APKs
+        if: steps.check-apks.outputs.skip_release == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # This build is incremental: only changed apps were rebuilt. Each release
+          # must be a COMPLETE set, so bring forward every APK that was NOT rebuilt
+          # this run from the current newest release (the previous build).
+          PREV_TAG=$(gh release list --limit 100 --json tagName,createdAt \
+            --jq 'sort_by(.createdAt) | reverse | .[0].tagName' 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            echo "No previous release; new release will contain only freshly built APKs."
+            exit 0
+          fi
+          echo "Carrying over unchanged APKs from previous release: $PREV_TAG"
+          mkdir -p ./prev-apks
+          gh release download "$PREV_TAG" --dir ./prev-apks --pattern '*.apk' \
+            || echo "⚠️  could not download previous APKs; continuing with freshly built only"
+          python scripts/merge_release_dir.py --new-dir ./release-apks --prev-dir ./prev-apks \
+            || echo "⚠️  merge_release_dir.py failed; continuing with freshly built only"
+          echo "📁 Combined release set:"
+          ls -la ./release-apks/
+
       - name: Build Final Manifest
         if: steps.check-apks.outputs.skip_release == 'false'
         run: |
@@ -332,21 +356,6 @@ jobs:
         run: |
           python scripts/validate_github_auth.py
 
-      - name: Check Existing Release
-        if: steps.check-apks.outputs.skip_release == 'false'
-        id: check-release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if gh release view latest >/dev/null 2>&1; then
-            echo "release_exists=true" >> "$GITHUB_OUTPUT"
-            echo "✅ Release 'latest' exists; assets will be updated in place."
-          else
-            echo "release_exists=false" >> "$GITHUB_OUTPUT"
-            echo "📭 Release 'latest' does not exist; it will be created."
-          fi
-      
       - name: Generate Release Notes
         if: steps.check-apks.outputs.skip_release == 'false'
         env:
@@ -367,11 +376,7 @@ jobs:
             cat changelog_section.md >> release_notes.md
           else
             echo "Changelog unavailable; writing a plain app list."
-            if [ "${{ steps.check-release.outputs.release_exists }}" = "true" ]; then
-              gh release view latest --json assets --jq '.assets[].name' > current_assets.txt
-            else
-              : > current_assets.txt
-            fi
+            : > current_assets.txt
             for apk in ./release-apks/*.apk; do
               [ -f "$apk" ] || continue
               basename "$apk" >> current_assets.txt
@@ -390,7 +395,7 @@ jobs:
           cat >> release_notes.md << 'EOF'
 
           ## Build information
-          Auto built daily at 6 AM UTC. Architectures: arm64-v8a, armeabi-v7a, universal.
+          Auto built daily at 03:17 UTC (08:47 IST) when an app or patch updates. Architectures: arm64-v8a, armeabi-v7a, universal.
 
           ## Architecture guide
           arm64-v8a: modern ARM devices (2014 and newer)
@@ -401,82 +406,71 @@ jobs:
           These APKs are built automatically. Use at your own risk.
           EOF
       
-      - name: Upload Or Create Release
+      - name: Create Release And Prune Old
+        id: release
         if: steps.check-apks.outputs.skip_release == 'false'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "🚀 Publishing rebuilt assets to release..."
-
-          # Count APKs
           apk_count=$(ls -1 ./release-apks/*.apk 2>/dev/null | wc -l || echo "0")
-
-          if [ $apk_count -eq 0 ]; then
+          if [ "$apk_count" -eq 0 ]; then
             echo "❌ No APKs found to release"
             exit 1
           fi
 
-          echo "📦 Releasing $apk_count APK(s)..."
+          # Each build is its OWN immutable release (versioned filenames kept). The
+          # previous build's release is left untouched, so download links already
+          # published elsewhere (e.g. the WordPress/Sinker feed) keep working until
+          # that release ages out of the rolling window pruned below.
+          TAG="build-$(date -u +'%Y%m%d-%H%M%S')"
+          TITLE="Morphe APKs - $(date -u +'%Y-%m-%d %H:%M') UTC"
+          echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
 
-          # Build the asset list: APKs + optional manifest.json
+          # Build the asset list: APKs (full carried-over set) + optional manifest.json
           ASSETS=( ./release-apks/*.apk )
           if [ -f ./release-apks/manifest.json ]; then
             ASSETS+=( ./release-apks/manifest.json )
             echo "📎 Including manifest.json"
           fi
 
-          if [ "${{ steps.check-release.outputs.release_exists }}" = "true" ]; then
-            echo "⬆️ Uploading rebuilt assets in place and refreshing release metadata..."
+          echo "🚀 Creating release $TAG with $apk_count APK(s)..."
+          gh release create "$TAG" \
+            --title "$TITLE" \
+            --notes-file release_notes.md \
+            --latest \
+            "${ASSETS[@]}"
 
-            # Delete superseded older-version APKs. The previous loop only deleted
-            # assets whose filename EXACTLY matched a new APK; since APK names
-            # embed the version, old versions (e.g. v2.4.0) never matched the new
-            # v2.5.0 and accumulated forever. cleanup_old_apks.py deletes any
-            # release APK sharing a {app}-{arch}- identity prefix with a new APK
-            # but with a different version.
-            : > keep_apks.txt
-            for apk in ./release-apks/*.apk; do
-              [ -f "$apk" ] || continue
-              basename "$apk" >> keep_apks.txt
-            done
-            # --retire removes permanently-renamed assets whose identity prefix no
-            # longer matches any new build. The anddea RVX apps were renamed from
-            # youtube*-revanced-anddea-*.apk to rvx-app/rvx-music-anddea-*.apk, so the
-            # old-named copies would otherwise linger forever.
-            python scripts/cleanup_old_apks.py --release latest --keep-file keep_apks.txt \
-              --retire 'revanced-anddea.*\.apk$' || \
-              echo "⚠️  cleanup_old_apks.py failed; continuing with exact-name cleanup"
-
-            # Upload new APKs and manifest
-            gh release upload latest "${ASSETS[@]}" --clobber
-            gh release edit latest \
-              --title "Morphe APKs - $(date +'%Y-%m-%d %H:%M')" \
-              --notes-file release_notes.md
-          else
-            echo "🆕 Creating 'latest' release..."
-            gh release create "latest" \
-              --title "Morphe APKs - $(date +'%Y-%m-%d %H:%M')" \
-              --notes-file release_notes.md \
-              "${ASSETS[@]}" \
-              --latest
-          fi
+          # Rolling window: keep only the 2 newest releases (this build + the
+          # previous one). The 3rd-oldest is deleted along with its tag and assets,
+          # so a published link stops working only after a newer build has been live
+          # for a full update cycle - long enough for the feed to have refreshed.
+          echo "🧹 Pruning old releases (keeping newest 2)..."
+          gh release list --limit 100 --json tagName,createdAt \
+            --jq 'sort_by(.createdAt) | reverse | .[2:] | .[].tagName' 2>/dev/null \
+            | while read -r old; do
+                [ -n "$old" ] || continue
+                echo "  deleting old release: $old"
+                gh release delete "$old" --cleanup-tag --yes \
+                  || echo "  warn: could not delete $old"
+              done
 
           echo "✅ Release publish step completed successfully!"
-      
+
       - name: Display Release URL
         if: steps.check-apks.outputs.skip_release == 'false'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          release_url=$(gh release view latest --json url --jq .url)
+          TAG="${{ steps.release.outputs.release_tag }}"
+          release_url=$(gh release view "$TAG" --json url --jq .url)
           echo "🔗 Release URL: $release_url"
           echo ""
           echo "📦 Direct Download Links:"
           for apk in ./release-apks/*.apk; do
             filename=$(basename "$apk")
-            echo "- $filename: $release_url/download/$filename"
+            echo "- $filename: https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$filename"
           done
 
   cleanup:

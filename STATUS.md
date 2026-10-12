@@ -18,9 +18,13 @@
 ## Version selection
 - App versions are not pinned. The builder asks the patches which versions they support and downloads the newest supported version it can fetch, trying every mirror for that version before considering a lower one. A single mirror missing the newest version no longer downgrades the build.
 
-## Release output
-- All APKs plus `manifest.json` are published to the single `latest` release.
-- Superseded copies are cleaned up automatically: only the newest version per app and architecture is kept.
+## Release output (rolling 2-release window)
+- Each build publishes its own immutable release, tagged `build-YYYYMMDD-HHMMSS` (UTC), marked as "Latest".
+- Every release is a COMPLETE set: the apps rebuilt this run, plus the unchanged apps carried over from the previous release (`scripts/merge_release_dir.py`), plus `manifest.json`.
+- Filenames keep the version, e.g. `youtube-arm64-v8a-morphe-v2.5.0.apk`, so the version is visible on the download.
+- Only the 2 newest releases are kept. When a 3rd build is published, the oldest release (and its tag and assets) is deleted automatically.
+- Why: a build replaces nothing in place, so download links already published elsewhere (VMPro, or the WordPress/Sinker feed) keep working. A link stops working only after a newer build has been live for a full update cycle, which is far longer than the feed takes to refresh. This removes the window where the feed's links 404 during a rebuild.
+- Consumers should read the newest release (GitHub `releases/latest`, or the first release that carries `manifest.json`); VMPro already does this, so dated tags do not break it.
 
 ## Apps and sources
 - Morphe: YouTube, YouTube Music, Reddit (`MorpheApp/morphe-patches`).
