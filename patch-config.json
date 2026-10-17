@@ -5,6 +5,7 @@
     { "app_name": "reddit", "source": "morphe" },
     { "app_name": "x-new", "source": "piko-newx" },
     { "app_name": "youtube", "source": "revanced-anddea" },
-    { "app_name": "youtube-music", "source": "revanced-anddea" }
+    { "app_name": "youtube-music", "source": "revanced-anddea" },
+    { "app_name": "youtube", "source": "reseam" }
   ]
 }

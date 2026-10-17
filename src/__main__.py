@@ -27,6 +27,180 @@ def _should_retry_with_older_version(output: str | None) -> bool:
         or "patching aborted" in t
     )
 
+# --- Reseam (git.reseam.app) ------------------------------------------------
+# Reseam is a separate patching ecosystem: a native `reseam` CLI applies a signed
+# `.reseam` bundle, with its own command, trust model and (pk8/der) signing. Kept
+# fully self-contained so it never touches the morphe/revanced code path.
+
+# Official Reseam patches signer, read from their signed bundle and pinned here so we
+# only ever apply bundles actually signed by Reseam.
+RESEAM_SIGNER = "556c1b22f4e03398212ba10fe6a31db252df49f599b938d24a9f2b6baec41a1d"
+
+# Stock package each app's bundle patches.
+_RESEAM_PACKAGE = {
+    "youtube": "com.google.android.youtube",
+    "youtube-music": "com.google.android.apps.youtube.music",
+}
+
+# Output filename stem per app (youtube -> yt-reseam-v<ver>.apk).
+_RESEAM_NAME = {
+    "youtube": "yt-reseam",
+    "youtube-music": "ytmusic-reseam",
+}
+
+# Patch options per app. GmsCore support is on in the recommended preset; it renames
+# the package (installs alongside the stock app) and signs in through the app.revanced
+# GmsCore the manager already ships.
+_RESEAM_OPTIONS = {
+    "youtube": [
+        "--option", "GmsCore support.gmsCoreVendorGroupId=app.revanced",
+        "--option", "GmsCore support.packageName=app.reseam.android.youtube",
+    ],
+}
+
+
+def _reseam_find_cli(files: "list[Path]"):
+    for f in files:
+        if f.name == "reseam-linux-x64" or (f.name.lower().startswith("reseam") and f.suffix == ""):
+            return f
+    return None
+
+
+def _reseam_version_key(v: str) -> tuple:
+    import re
+    return tuple(int(x) for x in re.findall(r"\d+", v)) or (0,)
+
+
+def _reseam_supported_versions(cli: "Path", bundle: "Path", package: str) -> "list[str]":
+    """Versions the bundle supports for `package`, newest first (reseam bundle list --json)."""
+    import json
+    try:
+        out = subprocess.run(
+            [str(cli), "bundle", "list", str(bundle), "--json"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        data = json.loads(out)
+    except Exception as e:
+        logging.warning(f"reseam bundle list failed: {e}")
+        return []
+    versions = set()
+    for patch in data.get("patches", []) or []:
+        compat = patch.get("compatibility") or {}
+        for pkg in compat.get("packages", []) or []:
+            if pkg.get("package") == package:
+                for v in pkg.get("versions", []) or []:
+                    if v:
+                        versions.add(str(v))
+    return sorted(versions, key=_reseam_version_key, reverse=True)
+
+
+def _reseam_signing_args() -> "list[str]":
+    """Convert the RVX BKS keystore to pk8/der for `reseam patch --key/--cert`, so builds
+    are signed with the user's key and update in place. Falls back to reseam's own
+    auto-generated key (no in-place updates) if the keystore is absent or unconvertible."""
+    ks = getenv("RVX_KEYSTORE_PATH")
+    if not ks or not Path(ks).exists():
+        logging.warning("No RVX keystore; reseam will auto-generate a key (updates won't be in-place).")
+        return []
+    pwd = getenv("RVX_KEYSTORE_PASSWORD", "")
+    alias = getenv("RVX_KEY_ALIAS", "")
+    keypass = getenv("RVX_KEY_PASSWORD", "") or pwd
+    try:
+        bcprov = Path("bcprov.jar")
+        if not bcprov.exists():
+            downloader.download_resource(
+                "https://repo1.maven.org/maven2/org/bouncycastle/bcprov-jdk18on/1.78.1/bcprov-jdk18on-1.78.1.jar",
+                "bcprov.jar",
+            )
+        p12 = Path("rvx.p12")
+        p12.unlink(missing_ok=True)
+        # BKS -> PKCS12 (keytool needs the BouncyCastle provider to read BKS).
+        subprocess.run([
+            "keytool", "-importkeystore", "-noprompt",
+            "-srckeystore", ks, "-srcstoretype", "BKS",
+            "-srcstorepass", pwd, "-srcalias", alias, "-srckeypass", keypass,
+            "-destkeystore", str(p12), "-deststoretype", "PKCS12",
+            "-deststorepass", pwd, "-destkeypass", pwd,
+            "-provider", "org.bouncycastle.jce.provider.BouncyCastleProvider",
+            "-providerpath", str(bcprov),
+        ], check=True, capture_output=True, text=True)
+        # PKCS12 -> pk8 (PKCS8 DER key) + der (DER cert).
+        subprocess.run(["openssl", "pkcs12", "-in", str(p12), "-passin", f"pass:{pwd}",
+                        "-nodes", "-nocerts", "-out", "rvx-key.pem"], check=True, capture_output=True, text=True)
+        subprocess.run(["openssl", "pkcs12", "-in", str(p12), "-passin", f"pass:{pwd}",
+                        "-nokeys", "-clcerts", "-out", "rvx-cert.pem"], check=True, capture_output=True, text=True)
+        subprocess.run(["openssl", "pkcs8", "-topk8", "-nocrypt", "-in", "rvx-key.pem",
+                        "-outform", "DER", "-out", "rvx.pk8"], check=True, capture_output=True, text=True)
+        subprocess.run(["openssl", "x509", "-in", "rvx-cert.pem", "-outform", "DER",
+                        "-out", "rvx.der"], check=True, capture_output=True, text=True)
+        if Path("rvx.pk8").exists() and Path("rvx.der").exists():
+            logging.info("Converted RVX BKS keystore to pk8/der for reseam signing.")
+            return ["--key", "rvx.pk8", "--cert", "rvx.der"]
+    except subprocess.CalledProcessError as e:
+        logging.warning(f"RVX key conversion failed: {e.stderr or e}; reseam will auto-sign.")
+    except Exception as e:
+        logging.warning(f"RVX key conversion failed ({e}); reseam will auto-sign.")
+    return []
+
+
+def _build_reseam(app_name: str, arch: str, download_files: "list[Path]"):
+    cli = _reseam_find_cli(download_files)
+    bundle = utils.find_file(download_files, suffix=".reseam")
+    if not cli or not bundle:
+        logging.error(f"❌ reseam CLI or bundle missing (files: {[f.name for f in download_files]})")
+        return None
+    try:
+        cli.chmod(0o755)
+    except Exception:
+        pass
+
+    package = _RESEAM_PACKAGE.get(app_name)
+    if not package:
+        logging.error(f"❌ reseam: no package mapping for app '{app_name}'")
+        return None
+
+    versions = _reseam_supported_versions(cli, bundle, package)
+    if not versions:
+        logging.error(f"❌ reseam: bundle lists no supported versions for {package}")
+        return None
+    logging.info(f"🔖 reseam supports {package}: {versions}")
+
+    # Download the base APK at the newest supported version, falling back down the list.
+    input_apk = None
+    version = None
+    for v in versions:
+        input_apk, got_ver, _ = downloader.download_best(app_name, "", "", arch, override_version=v)
+        if input_apk:
+            version = got_ver or v
+            break
+    if not input_apk or not version:
+        logging.error(f"❌ reseam: failed to download base APK for {app_name}")
+        return None
+
+    stem = _RESEAM_NAME.get(app_name, f"{app_name}-reseam")
+    output_apk = Path(f"{stem}-v{version}.apk")
+    output_apk.unlink(missing_ok=True)
+
+    cmd = [
+        str(cli), "patch", str(input_apk),
+        "--bundle", str(bundle),
+        "--trust", RESEAM_SIGNER,
+        "--preset", "recommended",
+        *_RESEAM_OPTIONS.get(app_name, []),
+        *_reseam_signing_args(),
+        "--output", str(output_apk),
+    ]
+    logging.info("🔧 Using Reseam patching system...")
+    utils.run_process(cmd, capture=True, stream=True)
+    input_apk.unlink(missing_ok=True)
+
+    if not output_apk.exists() or output_apk.stat().st_size == 0:
+        logging.error("❌ reseam patch produced no output APK")
+        return None
+    logging.info(f"✅ Built {output_apk.name}")
+    return str(output_apk)
+
+
 def run_build(app_name: str, source: str, arch: str = "universal") -> str:
     """Build APK for specific architecture"""
     download_files, name = downloader.download_required(source)
@@ -35,6 +209,10 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
     logging.info(f"📦 Downloaded {len(download_files)} files for {source}:")
     for file in download_files:
         logging.info(f"  - {file.name} ({file.stat().st_size} bytes)")
+
+    # Reseam is its own toolchain (native CLI + signed .reseam bundle), not morphe/revanced.
+    if name == "reseam":
+        return _build_reseam(app_name, arch, download_files)
 
     # DETECT SOURCE TYPE BASED ON DOWNLOADED FILES
     is_morphe = False

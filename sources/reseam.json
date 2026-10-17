@@ -1,0 +1,20 @@
+[
+    {
+        "name": "reseam"
+    },
+    {
+        "provider": "gitea",
+        "host": "https://git.reseam.app",
+        "user": "reseam",
+        "repo": "reseam",
+        "tag": "latest",
+        "asset": "reseam-linux-x64"
+    },
+    {
+        "provider": "gitea",
+        "host": "https://git.reseam.app",
+        "user": "reseam",
+        "repo": "patches",
+        "tag": "latest"
+    }
+]

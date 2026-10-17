@@ -198,10 +198,10 @@ _repo_sig_cache: Dict[Tuple[str, str, str, str], str] = {}
 _github_release_cache: Dict[Tuple[str, str, str], Optional[dict]] = {}
 
 
-def fetch_repo_signature(user: str, repo: str, tag: str, provider: str = "github") -> str:
+def fetch_repo_signature(user: str, repo: str, tag: str, provider: str = "github", host: str = "") -> str:
     """Get a stable identifier for the current state of a repo's release.
     Returns 'tag_name@published_at' on success, else a short error sentinel."""
-    key = (user, repo, tag, provider)
+    key = (user, repo, tag, provider, host)
     if key in _repo_sig_cache:
         return _repo_sig_cache[key]
 
@@ -212,6 +212,8 @@ def fetch_repo_signature(user: str, repo: str, tag: str, provider: str = "github
             sig = _fetch_gitlab_signature(repo, tag)
         elif provider == "codeberg":
             sig = _fetch_codeberg_signature(user, repo, tag)
+        elif provider == "gitea":
+            sig = _fetch_gitea_signature(host, user, repo, tag)
         else:
             sig = _fetch_github_signature(user, repo, tag)
         _repo_sig_cache[key] = sig
@@ -411,6 +413,24 @@ def _fetch_codeberg_signature(user: str, repo: str, tag: str) -> str:
     return f"{tag_name}@{published}"
 
 
+def _fetch_gitea_signature(host: str, user: str, repo: str, tag: str) -> str:
+    from urllib.parse import quote
+    base = f"{host.rstrip('/')}/api/v1/repos/{user}/{repo}/releases"
+    if tag == "latest":
+        api = f"{base}/latest"
+    elif tag in ("", "dev", "prerelease"):
+        api = base
+    else:
+        api = f"{base}/tags/{quote(tag, safe='')}"
+
+    data = provider_utils.fetch_json(api)
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    tag_name = data.get("tag_name") or "?"
+    published = data.get("published_at") or "?"
+    return f"{tag_name}@{published}"
+
+
 def _fetch_bundle_signature(bundle_url: str) -> str:
     """Compute a content-based signature for a bundle source.
 
@@ -505,6 +525,13 @@ def get_source_signature(source: str) -> str:
                 user = entry.get("user")
                 repo = entry.get("repo")
                 parts.append(f"codeberg:{user}/{repo}@{fetch_repo_signature(user, repo, tag, provider)}")
+            elif provider == "gitea" and has_github:
+                user = entry.get("user")
+                repo = entry.get("repo")
+                host = (entry.get("host") or "").strip().rstrip("/")
+                parts.append(
+                    f"gitea:{host}/{user}/{repo}@{fetch_repo_signature(user, repo, tag, provider, host)}"
+                )
             elif provider == "github" and has_github:
                 user = entry.get("user")
                 repo = entry.get("repo")

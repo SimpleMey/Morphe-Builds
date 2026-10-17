@@ -58,11 +58,19 @@ def download_required(source: str) -> tuple[list[Path], str]:
             or repo_info.get("name")
             or ""
         ).lower()
+        wanted_asset = (repo_info.get("asset") or "").strip()
 
         for asset in release["assets"]:
             asset_name = asset["name"]
             asset_url = asset["browser_download_url"]
             if asset_name.endswith(".asc"):
+                continue
+
+            # Entry pinned to a single asset (e.g. the reseam CLI binary) -> take only it,
+            # keeping the exact asset name so the file on disk is named predictably.
+            if wanted_asset:
+                if asset_name == wanted_asset:
+                    downloaded_files.append(download_resource(asset_url, asset_name))
                 continue
 
             # Keep the existing Morphe-specific asset filtering.

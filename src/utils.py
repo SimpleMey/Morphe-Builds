@@ -359,18 +359,28 @@ def normalize_source_entry(entry: dict) -> dict:
     provider = (entry.get("provider") or "github").lower().strip()
     tag = (entry.get("tag") or "latest").strip() or "latest"
 
-    if provider in ("github", "codeberg"):
+    if provider in ("github", "codeberg", "gitea"):
         user = (entry.get("user") or "").strip()
         repo = (entry.get("repo") or "").strip()
         if not user or not repo:
             raise ValueError(f"{provider} source entries require user and repo")
-        return {
+        norm = {
             "provider": provider,
             "tag": tag,
             "user": user,
             "repo": repo,
             "identity": f"{user}/{repo}",
         }
+        # A self-hosted Gitea instance (e.g. git.reseam.app) needs its base host.
+        if provider == "gitea":
+            host = (entry.get("host") or "").strip().rstrip("/")
+            if not host:
+                raise ValueError("gitea source entries require host")
+            norm["host"] = host
+        # Optional: restrict download to a single named asset (e.g. a CLI binary).
+        if entry.get("asset"):
+            norm["asset"] = str(entry["asset"]).strip()
+        return norm
 
     if provider == "gitlab":
         project = (entry.get("project") or "").strip()
@@ -421,7 +431,31 @@ def detect_release(entry: dict) -> dict:
     if provider == "codeberg":
         return detect_codeberg_release(normalized["user"], normalized["repo"], normalized["tag"])
 
+    if provider == "gitea":
+        return detect_gitea_release(
+            normalized["host"], normalized["user"], normalized["repo"], normalized["tag"]
+        )
+
     raise ValueError(f"Unsupported source provider: {provider}")
+
+
+def detect_gitea_release(host: str, user: str, repo: str, tag: str) -> dict:
+    """Resolve a release from a self-hosted Gitea instance (same API as Codeberg,
+    which is itself Gitea, but against an arbitrary host such as git.reseam.app)."""
+    base = f"{host.rstrip('/')}/api/v1/repos/{user}/{repo}/releases"
+    if tag == "latest":
+        data = fetch_json(f"{base}/latest")
+    elif tag in ("", "dev", "prerelease"):
+        releases = fetch_json(base)
+        if not isinstance(releases, list) or not releases:
+            raise ValueError(f"No releases found for Gitea repo {user}/{repo}")
+        data = releases[0]
+    else:
+        data = fetch_json(f"{base}/tags/{quote(tag, safe='')}")
+
+    if not isinstance(data, dict):
+        raise ValueError(f"Unexpected Gitea release response shape for {user}/{repo}/{tag}")
+    return normalize_release(data.get("tag_name"), data.get("published_at"), data.get("assets") or [])
 
 
 def detect_gitlab_release(project: str, tag: str) -> dict:

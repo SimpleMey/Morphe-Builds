@@ -28,3 +28,4 @@
 - Morphe: YouTube, YouTube Music, Reddit (`MorpheApp/morphe-patches`).
 - Anddea (RVX): RVX App (YouTube), RVX Music (YT Music) (`anddea/revanced-patches`, dev tag).
 - Piko: X / Twitter (`crimera/piko-newx`).
+- Reseam: YT Reseam (YouTube), from the Reseam toolchain on Gitea (`git.reseam.app/reseam/patches` bundle + `reseam/reseam` CLI, downloaded per build). It is its own patcher (native `reseam` CLI + signed `.reseam` bundle), not morphe/revanced: own patch path in `src/__main__.py`, output `yt-reseam-v<ver>.apk`, package `app.reseam.android.youtube`, GmsCore vendor `app.revanced`, signed with the RVX key (BKS converted to pk8/der at build time). Trust is pinned to Reseam's bundle signer.

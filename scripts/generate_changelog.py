@@ -54,12 +54,14 @@ APP_DISPLAY = {
     ("x-new", "piko-newx"): "X / Twitter (Piko)",
     ("youtube", "revanced-anddea"): "RVX App (YouTube)",
     ("youtube-music", "revanced-anddea"): "RVX Music (YouTube Music)",
+    ("youtube", "reseam"): "YT Reseam (YouTube)",
 }
 
 # Order apps appear in the notes. Anything not listed is appended, sorted.
 DISPLAY_ORDER = [
     ("youtube", "revanced-anddea"),
     ("youtube-music", "revanced-anddea"),
+    ("youtube", "reseam"),
     ("youtube", "morphe"),
     ("youtube-music", "morphe"),
     ("reddit", "morphe"),
