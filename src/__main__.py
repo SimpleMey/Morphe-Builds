@@ -95,52 +95,54 @@ def _reseam_supported_versions(cli: "Path", bundle: "Path", package: str) -> "li
 
 
 def _reseam_signing_args() -> "list[str]":
-    """Convert the RVX BKS keystore to pk8/der for `reseam patch --key/--cert`, so builds
-    are signed with the user's key and update in place. Falls back to reseam's own
-    auto-generated key (no in-place updates) if the keystore is absent or unconvertible."""
+    """Convert the RVX BKS keystore to pk8/der for `reseam patch --key/--cert`.
+
+    Every YT Reseam build MUST be signed with this one fixed key so users update in
+    place. This is mandatory and has no fallback: if the key is missing or cannot be
+    converted, we raise and the build fails, rather than ever signing with reseam's
+    own throwaway key (which would change the signature and break seamless updates)."""
     ks = getenv("RVX_KEYSTORE_PATH")
     if not ks or not Path(ks).exists():
-        logging.warning("No RVX keystore; reseam will auto-generate a key (updates won't be in-place).")
-        return []
+        raise RuntimeError(
+            "reseam signing: RVX keystore not available (set RVX_KEYSTORE_BASE64 / "
+            "RVX_KEYSTORE_PATH). Refusing to build without the fixed signing key."
+        )
     pwd = getenv("RVX_KEYSTORE_PASSWORD", "")
     alias = getenv("RVX_KEY_ALIAS", "")
     keypass = getenv("RVX_KEY_PASSWORD", "") or pwd
-    try:
-        bcprov = Path("bcprov.jar")
-        if not bcprov.exists():
-            downloader.download_resource(
-                "https://repo1.maven.org/maven2/org/bouncycastle/bcprov-jdk18on/1.78.1/bcprov-jdk18on-1.78.1.jar",
-                "bcprov.jar",
-            )
-        p12 = Path("rvx.p12")
-        p12.unlink(missing_ok=True)
-        # BKS -> PKCS12 (keytool needs the BouncyCastle provider to read BKS).
-        subprocess.run([
-            "keytool", "-importkeystore", "-noprompt",
-            "-srckeystore", ks, "-srcstoretype", "BKS",
-            "-srcstorepass", pwd, "-srcalias", alias, "-srckeypass", keypass,
-            "-destkeystore", str(p12), "-deststoretype", "PKCS12",
-            "-deststorepass", pwd, "-destkeypass", pwd,
-            "-provider", "org.bouncycastle.jce.provider.BouncyCastleProvider",
-            "-providerpath", str(bcprov),
-        ], check=True, capture_output=True, text=True)
-        # PKCS12 -> pk8 (PKCS8 DER key) + der (DER cert).
-        subprocess.run(["openssl", "pkcs12", "-in", str(p12), "-passin", f"pass:{pwd}",
-                        "-nodes", "-nocerts", "-out", "rvx-key.pem"], check=True, capture_output=True, text=True)
-        subprocess.run(["openssl", "pkcs12", "-in", str(p12), "-passin", f"pass:{pwd}",
-                        "-nokeys", "-clcerts", "-out", "rvx-cert.pem"], check=True, capture_output=True, text=True)
-        subprocess.run(["openssl", "pkcs8", "-topk8", "-nocrypt", "-in", "rvx-key.pem",
-                        "-outform", "DER", "-out", "rvx.pk8"], check=True, capture_output=True, text=True)
-        subprocess.run(["openssl", "x509", "-in", "rvx-cert.pem", "-outform", "DER",
-                        "-out", "rvx.der"], check=True, capture_output=True, text=True)
-        if Path("rvx.pk8").exists() and Path("rvx.der").exists():
-            logging.info("Converted RVX BKS keystore to pk8/der for reseam signing.")
-            return ["--key", "rvx.pk8", "--cert", "rvx.der"]
-    except subprocess.CalledProcessError as e:
-        logging.warning(f"RVX key conversion failed: {e.stderr or e}; reseam will auto-sign.")
-    except Exception as e:
-        logging.warning(f"RVX key conversion failed ({e}); reseam will auto-sign.")
-    return []
+
+    bcprov = Path("bcprov.jar")
+    if not bcprov.exists():
+        downloader.download_resource(
+            "https://repo1.maven.org/maven2/org/bouncycastle/bcprov-jdk18on/1.78.1/bcprov-jdk18on-1.78.1.jar",
+            "bcprov.jar",
+        )
+    p12 = Path("rvx.p12")
+    p12.unlink(missing_ok=True)
+    # BKS -> PKCS12 (keytool needs the BouncyCastle provider to read BKS). No try/except:
+    # any failure propagates and fails the build (no throwaway-key fallback).
+    subprocess.run([
+        "keytool", "-importkeystore", "-noprompt",
+        "-srckeystore", ks, "-srcstoretype", "BKS",
+        "-srcstorepass", pwd, "-srcalias", alias, "-srckeypass", keypass,
+        "-destkeystore", str(p12), "-deststoretype", "PKCS12",
+        "-deststorepass", pwd, "-destkeypass", pwd,
+        "-provider", "org.bouncycastle.jce.provider.BouncyCastleProvider",
+        "-providerpath", str(bcprov),
+    ], check=True, capture_output=True, text=True)
+    # PKCS12 -> pk8 (PKCS8 DER key) + der (DER cert).
+    subprocess.run(["openssl", "pkcs12", "-in", str(p12), "-passin", f"pass:{pwd}",
+                    "-nodes", "-nocerts", "-out", "rvx-key.pem"], check=True, capture_output=True, text=True)
+    subprocess.run(["openssl", "pkcs12", "-in", str(p12), "-passin", f"pass:{pwd}",
+                    "-nokeys", "-clcerts", "-out", "rvx-cert.pem"], check=True, capture_output=True, text=True)
+    subprocess.run(["openssl", "pkcs8", "-topk8", "-nocrypt", "-in", "rvx-key.pem",
+                    "-outform", "DER", "-out", "rvx.pk8"], check=True, capture_output=True, text=True)
+    subprocess.run(["openssl", "x509", "-in", "rvx-cert.pem", "-outform", "DER",
+                    "-out", "rvx.der"], check=True, capture_output=True, text=True)
+    if not (Path("rvx.pk8").exists() and Path("rvx.der").exists()):
+        raise RuntimeError("reseam signing: key conversion produced no pk8/der; refusing to sign.")
+    logging.info("Converted RVX BKS keystore to pk8/der for reseam signing.")
+    return ["--key", "rvx.pk8", "--cert", "rvx.der"]
 
 
 def _build_reseam(app_name: str, arch: str, download_files: "list[Path]"):
@@ -158,6 +160,10 @@ def _build_reseam(app_name: str, arch: str, download_files: "list[Path]"):
     if not package:
         logging.error(f"❌ reseam: no package mapping for app '{app_name}'")
         return None
+
+    # Resolve the one fixed signing key up front so we fail before the big APK download
+    # if it is unavailable (mandatory, no fallback -> users always update in place).
+    signing_args = _reseam_signing_args()
 
     versions = _reseam_supported_versions(cli, bundle, package)
     if not versions:
@@ -187,7 +193,7 @@ def _build_reseam(app_name: str, arch: str, download_files: "list[Path]"):
         "--trust", RESEAM_SIGNER,
         "--preset", "recommended",
         *_RESEAM_OPTIONS.get(app_name, []),
-        *_reseam_signing_args(),
+        *signing_args,
         "--output", str(output_apk),
     ]
     logging.info("🔧 Using Reseam patching system...")
