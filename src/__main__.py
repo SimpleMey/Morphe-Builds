@@ -149,8 +149,8 @@ def _build_reseam(app_name: str, arch: str, download_files: "list[Path]"):
     cli = _reseam_find_cli(download_files)
     bundle = utils.find_file(download_files, suffix=".reseam")
     if not cli or not bundle:
-        logging.error(f"❌ reseam CLI or bundle missing (files: {[f.name for f in download_files]})")
-        return None
+        raise RuntimeError(f"reseam: CLI or bundle missing after download "
+                           f"(files: {[f.name for f in download_files]})")
     try:
         cli.chmod(0o755)
     except Exception:
@@ -167,8 +167,8 @@ def _build_reseam(app_name: str, arch: str, download_files: "list[Path]"):
 
     versions = _reseam_supported_versions(cli, bundle, package)
     if not versions:
-        logging.error(f"❌ reseam: bundle lists no supported versions for {package}")
-        return None
+        raise RuntimeError(f"reseam: bundle lists no supported versions for {package} "
+                           f"(reseam CLI/bundle engine mismatch, or bundle list parse failed)")
     logging.info(f"🔖 reseam supports {package}: {versions}")
 
     # Download the base APK at the newest supported version, falling back down the list.
@@ -180,8 +180,8 @@ def _build_reseam(app_name: str, arch: str, download_files: "list[Path]"):
             version = got_ver or v
             break
     if not input_apk or not version:
-        logging.error(f"❌ reseam: failed to download base APK for {app_name}")
-        return None
+        raise RuntimeError(f"reseam: could not download a supported base APK for {app_name} "
+                           f"(tried versions {versions} across all providers)")
 
     stem = _RESEAM_NAME.get(app_name, f"{app_name}-reseam")
     output_apk = Path(f"{stem}-v{version}.apk")
@@ -201,8 +201,7 @@ def _build_reseam(app_name: str, arch: str, download_files: "list[Path]"):
     input_apk.unlink(missing_ok=True)
 
     if not output_apk.exists() or output_apk.stat().st_size == 0:
-        logging.error("❌ reseam patch produced no output APK")
-        return None
+        raise RuntimeError("reseam: patch command produced no output APK")
     logging.info(f"✅ Built {output_apk.name}")
     return str(output_apk)
 
