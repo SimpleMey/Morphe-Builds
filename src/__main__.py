@@ -94,13 +94,15 @@ def _reseam_supported_versions(cli: "Path", bundle: "Path", package: str) -> "li
     return sorted(versions, key=_reseam_version_key, reverse=True)
 
 
-def _reseam_signing_args() -> "list[str]":
-    """Convert the RVX BKS keystore to pk8/der for `reseam patch --key/--cert`.
+def _reseam_prepare_p12() -> "dict":
+    """Convert the RVX BKS keystore to a PKCS12 that apksigner can read.
 
-    Every YT Reseam build MUST be signed with this one fixed key so users update in
-    place. This is mandatory and has no fallback: if the key is missing or cannot be
-    converted, we raise and the build fails, rather than ever signing with reseam's
-    own throwaway key (which would change the signature and break seamless updates)."""
+    Reseam's own (ring-based) signer rejects the ReVanced RSA key ("WrongAlgorithm"),
+    so instead of signing inside reseam we let reseam self-sign, then re-sign the
+    output with the RVX key via apksigner (exactly like the anddea RVX builds). This
+    is mandatory with no fallback: every YT Reseam build must carry the one fixed RVX
+    signature so users update in place, so if the key is missing or unconvertible we
+    raise and the build fails rather than shipping a differently-signed APK."""
     ks = getenv("RVX_KEYSTORE_PATH")
     if not ks or not Path(ks).exists():
         raise RuntimeError(
@@ -119,8 +121,8 @@ def _reseam_signing_args() -> "list[str]":
         )
     p12 = Path("rvx.p12")
     p12.unlink(missing_ok=True)
-    # BKS -> PKCS12 (keytool needs the BouncyCastle provider to read BKS). No try/except:
-    # any failure propagates and fails the build (no throwaway-key fallback).
+    # BKS -> PKCS12 (keytool needs the BouncyCastle provider to read BKS; apksigner reads
+    # PKCS12 natively). No try/except: any failure propagates and fails the build.
     subprocess.run([
         "keytool", "-importkeystore", "-noprompt",
         "-srckeystore", ks, "-srcstoretype", "BKS",
@@ -130,19 +132,10 @@ def _reseam_signing_args() -> "list[str]":
         "-provider", "org.bouncycastle.jce.provider.BouncyCastleProvider",
         "-providerpath", str(bcprov),
     ], check=True, capture_output=True, text=True)
-    # PKCS12 -> pk8 (PKCS8 DER key) + der (DER cert).
-    subprocess.run(["openssl", "pkcs12", "-in", str(p12), "-passin", f"pass:{pwd}",
-                    "-nodes", "-nocerts", "-out", "rvx-key.pem"], check=True, capture_output=True, text=True)
-    subprocess.run(["openssl", "pkcs12", "-in", str(p12), "-passin", f"pass:{pwd}",
-                    "-nokeys", "-clcerts", "-out", "rvx-cert.pem"], check=True, capture_output=True, text=True)
-    subprocess.run(["openssl", "pkcs8", "-topk8", "-nocrypt", "-in", "rvx-key.pem",
-                    "-outform", "DER", "-out", "rvx.pk8"], check=True, capture_output=True, text=True)
-    subprocess.run(["openssl", "x509", "-in", "rvx-cert.pem", "-outform", "DER",
-                    "-out", "rvx.der"], check=True, capture_output=True, text=True)
-    if not (Path("rvx.pk8").exists() and Path("rvx.der").exists()):
-        raise RuntimeError("reseam signing: key conversion produced no pk8/der; refusing to sign.")
-    logging.info("Converted RVX BKS keystore to pk8/der for reseam signing.")
-    return ["--key", "rvx.pk8", "--cert", "rvx.der"]
+    if not p12.exists():
+        raise RuntimeError("reseam signing: BKS->PKCS12 conversion produced no keystore.")
+    logging.info("Converted RVX BKS keystore to PKCS12 for reseam signing.")
+    return {"ks": str(p12), "storepass": pwd, "alias": alias, "keypass": pwd}
 
 
 def _build_reseam(app_name: str, arch: str, download_files: "list[Path]"):
@@ -164,9 +157,9 @@ def _build_reseam(app_name: str, arch: str, download_files: "list[Path]"):
         logging.error(f"❌ reseam: no package mapping for app '{app_name}'")
         return None
 
-    # Resolve the one fixed signing key up front so we fail before the big APK download
-    # if it is unavailable (mandatory, no fallback -> users always update in place).
-    signing_args = _reseam_signing_args()
+    # Prepare the one fixed signing keystore up front so we fail before the big APK
+    # download if it is unavailable (mandatory, no fallback -> users always update in place).
+    ks_info = _reseam_prepare_p12()
 
     versions = _reseam_supported_versions(cli, bundle, package)
     if not versions:
@@ -196,7 +189,6 @@ def _build_reseam(app_name: str, arch: str, download_files: "list[Path]"):
         "--trust", RESEAM_SIGNER,
         "--preset", "recommended",
         *_RESEAM_OPTIONS.get(app_name, []),
-        *signing_args,
         "--output", str(output_apk),
     ]
     logging.info("🔧 Using Reseam patching system...")
@@ -205,7 +197,22 @@ def _build_reseam(app_name: str, arch: str, download_files: "list[Path]"):
 
     if not output_apk.exists() or output_apk.stat().st_size == 0:
         raise RuntimeError("reseam: patch command produced no output APK")
-    logging.info(f"✅ Built {output_apk.name}")
+
+    # Reseam self-signed with its own key; re-sign with the fixed RVX key via apksigner
+    # (strips reseam's signature and applies ours) so every build shares one signature.
+    apksigner = utils.find_apksigner()
+    if not apksigner:
+        raise RuntimeError("reseam signing: apksigner not found")
+    utils.run_process([
+        str(apksigner), "sign", "--verbose",
+        "--ks", ks_info["ks"], "--ks-type", "PKCS12",
+        "--ks-pass", f"pass:{ks_info['storepass']}",
+        "--ks-key-alias", ks_info["alias"],
+        "--key-pass", f"pass:{ks_info['keypass']}",
+        str(output_apk),
+    ], capture=True, stream=True)
+
+    logging.info(f"✅ Built {output_apk.name} (signed with RVX key)")
     return str(output_apk)
 
 
