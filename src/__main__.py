@@ -151,6 +151,9 @@ def _build_reseam(app_name: str, arch: str, download_files: "list[Path]"):
     if not cli or not bundle:
         raise RuntimeError(f"reseam: CLI or bundle missing after download "
                            f"(files: {[f.name for f in download_files]})")
+    # Use an ABSOLUTE path to exec the CLI: a bare relative name ("reseam-linux-x64")
+    # is looked up on PATH, not the cwd, so it would not be found when run.
+    cli = cli.resolve()
     try:
         cli.chmod(0o755)
     except Exception:
