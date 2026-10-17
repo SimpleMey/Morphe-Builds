@@ -69,7 +69,8 @@ DISPLAY_ORDER = [
 ]
 
 # CLI repos are not the patch bundle; skip them when picking the patches repo.
-_CLI_REPOS = {"morphe-cli", "revanced-cli"}
+# "reseam" is the reseam CLI repo (the patches repo is "patches").
+_CLI_REPOS = {"morphe-cli", "revanced-cli", "reseam"}
 
 BODY_LIMIT = 6000  # max characters of upstream notes to embed per app
 
@@ -88,12 +89,33 @@ def gh_api(path: str):
         return None
 
 
-def fetch_release(user: str, repo: str, tag: str):
+def _http_json(url: str):
+    """Fetch and parse JSON over HTTP (for non-GitHub hosts such as Gitea), using the
+    same requests session (with certifi CAs) the rest of the pipeline uses."""
+    try:
+        from src import utils as provider_utils
+        return provider_utils.fetch_json(url)
+    except Exception as e:
+        print(f"  http {url} failed: {str(e)[:200]}", file=sys.stderr)
+        return None
+
+
+def fetch_release(user: str, repo: str, tag: str, provider: str = "github", host: str = ""):
     """Resolve a source tag to a release object (with body/html_url/tag_name).
 
     Mirrors src/utils.detect_github_release: 'latest' -> releases/latest,
     'dev'/'prerelease'/'' -> newest matching release, otherwise a tagged release.
+    Gitea-hosted sources (e.g. git.reseam.app) use the Gitea API over HTTP instead of gh.
     """
+    if provider == "gitea":
+        base = f"{host.rstrip('/')}/api/v1/repos/{user}/{repo}/releases"
+        if tag == "latest":
+            return _http_json(f"{base}/latest")
+        if tag in ("", "dev", "prerelease"):
+            rels = _http_json(base)
+            return rels[0] if isinstance(rels, list) and rels else None
+        return _http_json(f"{base}/tags/{tag}")
+
     if tag == "latest":
         return gh_api(f"repos/{user}/{repo}/releases/latest")
     if tag in ("", "dev", "prerelease"):
@@ -134,7 +156,9 @@ def resolve_patch_repo(source: str):
             continue
         if repo.lower() in _CLI_REPOS:
             continue
-        picked = (user, repo, (entry.get("tag") or "latest").strip())
+        provider = (entry.get("provider") or "github").lower().strip()
+        host = (entry.get("host") or "").strip().rstrip("/")
+        picked = (user, repo, (entry.get("tag") or "latest").strip(), provider, host)
     return picked
 
 
@@ -189,10 +213,11 @@ def render(apps: dict) -> str:
 
         repo_info = resolve_patch_repo(source)
         if repo_info:
-            user, repo, tag = repo_info
-            if (user, repo, tag) not in release_cache:
-                release_cache[(user, repo, tag)] = fetch_release(user, repo, tag)
-            rel = release_cache[(user, repo, tag)]
+            user, repo, tag, provider, host = repo_info
+            ckey = (user, repo, tag, provider, host)
+            if ckey not in release_cache:
+                release_cache[ckey] = fetch_release(user, repo, tag, provider, host)
+            rel = release_cache[ckey]
         else:
             user = repo = tag = ""
             rel = None
@@ -205,7 +230,13 @@ def render(apps: dict) -> str:
             html_url = (rel or {}).get("html_url", "")
             out.append(f"Patches: `{user}/{repo}` ({rel_tag})")
             out.append("")
-            out.append(trim_body((rel or {}).get("body", ""), html_url))
+            body = (rel or {}).get("body", "")
+            if not (body or "").strip() and provider == "gitea":
+                # Reseam publishes no per-release notes; say so instead of the generic
+                # "no changelog provided", and let the release link below carry the detail.
+                body = ("Reseam does not publish per-release changelogs. This build applies "
+                        "the Reseam recommended patch set for this app.")
+            out.append(trim_body(body, html_url))
             if html_url:
                 out.append("")
                 out.append(f"Full changelog: {html_url}")
