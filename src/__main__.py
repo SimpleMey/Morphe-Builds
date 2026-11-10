@@ -218,16 +218,29 @@ def _build_reseam(app_name: str, arch: str, download_files: "list[Path]"):
 
 def run_build(app_name: str, source: str, arch: str = "universal") -> str:
     """Build APK for specific architecture"""
+    # Reseam is its own toolchain (native CLI + signed .reseam bundle) hosted on a volatile
+    # third-party Gitea (git.reseam.app). Upstream has repeatedly changed how it ships: recent
+    # releases carry no assets at all (the project moved to a Gradle-plugin / SDK model), which
+    # left the download empty and failed the entire workflow. Treat the whole reseam path as
+    # best-effort: on ANY failure, log and skip it (return None) so every other app still builds
+    # and the release still publishes. Restoring reseam needs a rewrite to its new Gradle flow.
+    if source == "reseam":
+        try:
+            reseam_files, _ = downloader.download_required(source)
+            logging.info(f"📦 Downloaded {len(reseam_files)} files for {source}:")
+            for file in reseam_files:
+                logging.info(f"  - {file.name} ({file.stat().st_size} bytes)")
+            return _build_reseam(app_name, arch, reseam_files)
+        except Exception as e:
+            logging.warning(f"⚠️ Skipping reseam build for {app_name}: {e}")
+            return None
+
     download_files, name = downloader.download_required(source)
 
     # Log downloaded files for debugging
     logging.info(f"📦 Downloaded {len(download_files)} files for {source}:")
     for file in download_files:
         logging.info(f"  - {file.name} ({file.stat().st_size} bytes)")
-
-    # Reseam is its own toolchain (native CLI + signed .reseam bundle), not morphe/revanced.
-    if name == "reseam":
-        return _build_reseam(app_name, arch, download_files)
 
     # DETECT SOURCE TYPE BASED ON DOWNLOADED FILES
     is_morphe = False
