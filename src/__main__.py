@@ -72,7 +72,12 @@ def _reseam_version_key(v: str) -> tuple:
 
 
 def _reseam_supported_versions(cli: "Path", bundle: "Path", package: str) -> "list[str]":
-    """Versions the bundle supports for `package`, newest first (reseam bundle list --json)."""
+    """Versions the bundle supports for `package`, newest first (reseam bundle list --json).
+
+    Tolerant of the JSON shape across engine versions: a patch's compatible apps have appeared
+    under `compatibility.packages`, `apps`, and `packages`, each item being a dict carrying a
+    package id (`package`/`name`/`id`) and a `versions` list. When nothing is found, a sample of
+    the raw output is logged so the exact current shape is visible in the build log."""
     import json
     try:
         out = subprocess.run(
@@ -83,14 +88,29 @@ def _reseam_supported_versions(cli: "Path", bundle: "Path", package: str) -> "li
     except Exception as e:
         logging.warning(f"reseam bundle list failed: {e}")
         return []
+
     versions = set()
-    for patch in data.get("patches", []) or []:
-        compat = patch.get("compatibility") or {}
-        for pkg in compat.get("packages", []) or []:
-            if pkg.get("package") == package:
-                for v in pkg.get("versions", []) or []:
+
+    def collect(apps):
+        for a in apps or []:
+            if not isinstance(a, dict):
+                continue
+            pkg = a.get("package") or a.get("name") or a.get("id")
+            if pkg == package:
+                for v in (a.get("versions") or []):
                     if v:
                         versions.add(str(v))
+
+    for patch in (data.get("patches") or []):
+        collect((patch.get("compatibility") or {}).get("packages"))
+        collect(patch.get("apps"))
+        collect(patch.get("packages"))
+
+    if not versions:
+        logging.warning(
+            f"reseam: parsed no supported versions for {package}; "
+            f"bundle list --json sample: {out[:800]}"
+        )
     return sorted(versions, key=_reseam_version_key, reverse=True)
 
 
@@ -136,6 +156,45 @@ def _reseam_prepare_p12() -> "dict":
         raise RuntimeError("reseam signing: BKS->PKCS12 conversion produced no keystore.")
     logging.info("Converted RVX BKS keystore to PKCS12 for reseam signing.")
     return {"ks": str(p12), "storepass": pwd, "alias": alias, "keypass": pwd}
+
+
+def _reseam_download() -> "list[Path]":
+    """Download the reseam CLI and the official signed patch bundle from reseam.app.
+
+    Reseam emptied its Gitea release assets and moved distribution to its own CDN/API: the CLI
+    lives at cdn.reseam.app/engine/v<engine>/reseam-linux-x64 and the signed bundle is served from
+    api.reseam.app (indexed in patches.json). The CLI must match the engine version the current
+    bundle was built against, which reseam pins as the app.reseam.workspace plugin version in its
+    reseam/patches settings.gradle.kts. Returns [cli_path, bundle_path] for _build_reseam()."""
+    # Engine version the current patch bundle targets -> the matching CLI build to download.
+    settings_path = downloader.download_resource(
+        "https://git.reseam.app/reseam/patches/raw/branch/main/settings.gradle.kts",
+        "reseam-settings.gradle.kts",
+    )
+    m = re.search(
+        r'id\("app\.reseam\.workspace"\)\s+version\s+"([^"]+)"', settings_path.read_text()
+    )
+    if not m:
+        raise RuntimeError("reseam: could not read engine version from settings.gradle.kts")
+    engine = m.group(1)
+
+    cli_path = downloader.download_resource(
+        f"https://cdn.reseam.app/engine/v{engine}/reseam-linux-x64", "reseam-linux-x64",
+    )
+
+    # Latest official (stable) bundle from the patches registry (GET /patches.json).
+    index = utils.fetch_json("https://api.reseam.app/patches.json")
+    releases = index.get("releases") or []
+    rel = next((r for r in releases if not r.get("prerelease")), None) or (
+        releases[0] if releases else None
+    )
+    if not rel or not rel.get("download_url"):
+        raise RuntimeError("reseam: patches.json has no downloadable release")
+    bundle_path = downloader.download_resource(rel["download_url"], "reseam-patches.reseam")
+    logging.info(
+        f"reseam: engine v{engine}, patches {rel.get('version')} -> {bundle_path.name}"
+    )
+    return [cli_path, bundle_path]
 
 
 def _build_reseam(app_name: str, arch: str, download_files: "list[Path]"):
@@ -187,7 +246,8 @@ def _build_reseam(app_name: str, arch: str, download_files: "list[Path]"):
         str(cli), "patch", str(input_apk),
         "--bundle", str(bundle),
         "--trust", RESEAM_SIGNER,
-        "--preset", "recommended",
+        # New engine (0.39+) dropped "--preset recommended"; the default selection is the
+        # on-by-default patches, which is what "recommended" used to mean.
         *_RESEAM_OPTIONS.get(app_name, []),
         "--output", str(output_apk),
     ]
@@ -226,7 +286,7 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
     # and the release still publishes. Restoring reseam needs a rewrite to its new Gradle flow.
     if source == "reseam":
         try:
-            reseam_files, _ = downloader.download_required(source)
+            reseam_files = _reseam_download()
             logging.info(f"📦 Downloaded {len(reseam_files)} files for {source}:")
             for file in reseam_files:
                 logging.info(f"  - {file.name} ({file.stat().st_size} bytes)")
