@@ -479,6 +479,50 @@ jobs:
             echo "- $filename: $release_url/download/$filename"
           done
 
+  publish-catalog:
+    name: Publish VMPro Catalog
+    needs: [check-updates, create-single-release]
+    runs-on: ubuntu-latest
+    # Always refresh catalog.json, even on runs with no Morphe rebuild, so external apps
+    # (NewTube, Flow, GmsCore, MicroG RE, modules, TV) and VMPro's own version stay current.
+    if: always()
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install requests beautifulsoup4
+
+      # Best-effort: the app falls back to the live API when catalog.json is missing, so a
+      # hiccup here must not turn the whole workflow red.
+      - name: Build catalog.json
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/build_catalog.py
+
+      - name: Upload catalog.json to latest release
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -f catalog.json ] && gh release view latest >/dev/null 2>&1; then
+            gh release upload latest catalog.json --clobber
+            echo "✅ catalog.json published to the 'latest' release"
+          else
+            echo "📭 catalog.json missing or no 'latest' release; skipping catalog upload"
+          fi
+
   cleanup:
     name: Cleanup Workflow Runs
     needs: [build-apps, create-single-release]
